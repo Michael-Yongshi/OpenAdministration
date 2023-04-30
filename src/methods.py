@@ -253,7 +253,7 @@ def convert_to_uniform(csv_dict, template):
 
 def convert_to_category(csv_dict):
     
-    with open("src/known_accounts.json", "r") as infile:
+    with open("data/known_accounts.json", "r") as infile:
         known_accounts = json.load(infile)
     
         # print(known_accounts)
@@ -265,7 +265,7 @@ def convert_to_category(csv_dict):
                     csv_dict[row]["Category"] = known_accounts[account]
                     break
 
-    with open("src/known_accounts_simple.json", "r") as infile:
+    with open("data/known_accounts_simple.json", "r") as infile:
         known_accounts = json.load(infile)
         # print(known_accounts)
         for row in csv_dict:
