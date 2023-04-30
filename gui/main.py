@@ -1,15 +1,17 @@
 import sys
+import logging
+
 from tkinter import dialog
 from venv import create
+from numpy import double
 
-from PyQt5.QtCore import (
+from PyQt6.QtCore import (
     QSettings,
     QDate,
     Qt,
     )
 
-from PyQt5.QtWidgets import (
-    QAction,
+from PyQt6.QtWidgets import (
     QApplication,
     QCalendarWidget,
     QCheckBox,
@@ -33,25 +35,23 @@ from PyQt5.QtWidgets import (
     QTableWidgetItem,
     )
 
-from PyQt5.QtGui import (
+from PyQt6.QtGui import (
+    QAction,
     QIcon,
     QDoubleValidator,
     )
 
-from darktheme.widget_template import (
+from darktheme.widget_template_pyqt6 import (
     DarkPalette,
     QBorderlessFrame,
     QBorderedWidget,
     QClickLabel,
 )
-from numpy import double
 
-from src.database import (
-    initialize_sqlitehandler,
-    get_tables,
-    get_columns,
-    create_records,
-)
+from sqlitemanager import handler
+from sqlitemanager.objects import Database
+
+from src.helpers import calc_invoice_total, calc_invoice_vat, get_database_info, get_date_range, get_columns, get_records, check_tables, create_records
 
 class QMainApplication(QApplication):
     """A Dark styled application."""
@@ -72,8 +72,8 @@ class MainWindow (QMainWindow):
         # create empty settings of the main window
         self.settings = QSettings("Michael-Yongshi", "Administration")
 
-        # store persistent variables
-        self.handler = None
+        # connect to database
+        self.db = None
 
         # set menu bar
         bar = self.menuBar()
@@ -115,7 +115,7 @@ class MainWindow (QMainWindow):
         self.settings.setValue("windowState", self.saveState())
 
         # update nested widget
-        if self.handler == None:
+        if self.db == None:
             self.nested_widget = QBorderedWidget()
         else:
             self.nested_widget = self.set_nested_widget()
@@ -142,7 +142,9 @@ class MainWindow (QMainWindow):
 
     def create_administration(self):
 
-        self.handler = initialize_sqlitehandler()
+        # TODO , create a database at path of your choice
+        self.db = Database(filename="administration")
+        check_tables(db=self.db)
 
         # restart ui to force changes
         self.initUI()
@@ -193,9 +195,9 @@ class WidgetOverview(QBorderedWidget):
         layout.addWidget(daterangewidget)
 
         query = f"SELECT category, Sum(Amount) FROM {tablename} WHERE date BETWEEN {daterange[0]} AND {daterange[1]} GROUP BY category"
+        result = self.mainwindow.db.execute_query(query)
 
-        result = self.mainwindow.handler.database.execute_query(query)
-        print(f"query result = {result}")
+        logging.info(f"query result = {result}")
 
         profitwidget.setLayout(layout)
         return profitwidget
@@ -239,25 +241,26 @@ class WidgetPurchases(QBorderedWidget):
 
         table = QTableWidget(self)
 
-        columns = get_columns(handler = self.mainwindow.handler, tablename = self.tablename)
+        records = handler.get_records(db=self.mainwindow.db, table_name=self.tablename)
+        logging.info(f"records: {records}")
+
+        # only fetch columns seperately from the database if returned records is an empty list
+        if records == []:
+            columns = handler.get_table_column_names(db=self.mainwindow.db, table_selection=self.tablename)
+        # else get columns just from the first record returned
+        else:
+            columns = records[0].columns
 
         table.setHorizontalHeaderLabels(columns)
         table.setColumnCount(len(columns))
         table.setRowCount(10)
 
-        records = self.mainwindow.handler.table_read_records(tablename=self.tablename)
-        print(f"records: {records}")
-
-        table_data = []
-        for record in records:
-            print(f"record: {record.values}")
-            table_data.append(record.values)
-
+        # Iterate over rows and columns to fill the Table widget
         row = 0
-        for r in table_data:
+        for record in records:
             col = 0
-            for item in r:
-                cell = QTableWidgetItem(str(item))
+            for value in record.values:
+                cell = QTableWidgetItem(str(value))
                 table.setItem(row, col, cell)
                 col += 1
             row += 1
@@ -295,12 +298,14 @@ class QPurchaseDialog(QDialog):
         formlayout = QFormLayout()
 
         self.catform = QComboBox()
-        category_records = self.mainwindow.handler.table_read_records(tablename="purchase_categories")
-        # print(category_records)
+        category_records = handler.get_records(db=self.mainwindow.db, table_name="purchase_categories")
+        logging.info(category_records)
+
         categories = []
         for category_record in category_records:
-            categories += [category_record.get_column_value("name")]
-        # print(categories)
+            categories += [category_record.dict["name"]]
+        logging.info(categories)
+
         self.catform.addItems(categories)
         formlayout.addRow(QLabel("Category:"), self.catform)
 
@@ -318,6 +323,7 @@ class QPurchaseDialog(QDialog):
         self.amountform.textChanged.connect(self.on_change)
         formlayout.addRow(QLabel("Amount:"), self.amountform)
 
+        # TODO, make vat form dynamic with extra VAT type table
         self.vatform = QComboBox()
         self.vatform.addItems(["21", "6", "0"])
         self.vatform.setEditable(True)
@@ -336,7 +342,7 @@ class QPurchaseDialog(QDialog):
         self.formGroupBox.setLayout(formlayout)
 
         # add buttons
-        self.buttonbox = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.buttonbox = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.buttonbox.accepted.connect(self.accept)
         self.buttonbox.rejected.connect(self.reject)
 
@@ -360,10 +366,19 @@ class QPurchaseDialog(QDialog):
 
     def accept(self):
         
-        values = [[1, self.idform.text(), self.catform.currentText(), self.suppform.text(), self.dateform.selectedDate().toString('yyyyMMdd'), self.amountform.text(), self.vatamountform.text(), self.paidform.checkState()]]
-        print(f"Created new invoice: {values}")
+        record = {
+            "id": self.idform.text(), 
+            "category": self.catform.currentText(), 
+            "supplier": self.suppform.text(), 
+            "date": self.dateform.selectedDate().toString('yyyyMMdd'), 
+            "amount": self.amountform.text(), 
+            "vat_type": self.vatform.currentText(),
+            "vat": self.vatamountform.text(), 
+            "isPaid": self.paidform.checkState(),
+        }
+        logging.info(f"Created new invoice: {record}")
 
-        create_records(handler=self.mainwindow.handler, tablename="purchases", values=values)
+        handler.create_records(db=self.mainwindow.db, table_name="purchases", records=[record])
 
         self.idform.setText("")
         self.amountform.setText("")
@@ -394,61 +409,15 @@ class WidgetSystem(QBorderedWidget):
         sysbox = QGridLayout()
         
         label = QClickLabel()
-        label.setText(get_tables(mainwindow.handler))
+        label.setText(get_database_info(db=self.mainwindow.db))
         sysbox.addWidget(label, 0, 0)
 
         self.setToolTip("database")
         self.setLayout(sysbox)
-
-def calc_invoice_vat(vatpercentage_float, amount_float):
-    # TODO
-    # check comma, dot
-
-    try:
-        vatamount = vatpercentage_float / 100 * amount_float
-        total = vatamount + amount_float
-        return vatamount
-
-    except:
-        return 0
-
-def calc_invoice_total(vatpercentage_float, amount_float):
-    # TODO
-    # check comma, dot
-
-    try:
-        vatamount = calc_invoice_vat(vatpercentage_float, amount_float)
-        total = vatamount + amount_float
-        return total
-
-    except:
-        return 0
-
-def get_date_range(year, quarter):
-
-    if quarter in ["", None, "All"]:
-        low = year + '0101'
-        high = year + '1231'
-    elif quarter == "Q1":
-        low = year + '0101'
-        high = year + '0331'
-    elif quarter == "Q2":
-        low = year + '0401'
-        high = year + '0631'
-    elif quarter == "Q3":
-        low = year + '0701'
-        high = year + '0931'
-    elif quarter == "Q4":
-        low = year + '1001'
-        high = year + '1231'
-    else:
-        low = 0
-        high = 99991231
-    return [low, high]
 
 def run():
     global app
     app = QMainApplication(sys.argv)
     global main
     main = MainWindow()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
