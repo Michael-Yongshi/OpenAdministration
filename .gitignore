@@ -132,6 +132,4 @@ dmypy.json
 compiled-contracts/
 
 # excel files or csv
-.csv
-.xls
-.xlsx
+/data
